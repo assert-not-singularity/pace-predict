@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "installed": [
+    "working-style",
+    "python",
+    "scalable-architecture",
+    "prose-and-docs",
+    "git-conventions",
+    "subagent-orchestration",
+    "technical-writer",
+    "lean-implementer",
+    "janitor",
+    "web-researcher"
+  ]
+}
