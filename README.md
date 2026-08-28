@@ -1,5 +1,7 @@
 # pace-predict
 
+[![CI](https://github.com/assert-not-singularity/pace-predict/actions/workflows/ci.yml/badge.svg)](https://github.com/assert-not-singularity/pace-predict/actions/workflows/ci.yml)
+
 Estimate running pace from Garmin running dynamics — cadence, ground-contact time, and vertical
 oscillation — so a watch data field can display accurate pace instantly, without waiting for GNSS
 to re-settle at interval starts or under tree cover.
