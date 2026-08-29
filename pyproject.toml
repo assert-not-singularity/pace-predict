@@ -5,7 +5,12 @@ description = "Estimate running pace from Garmin running dynamics for an instant
 readme = "README.md"
 requires-python = ">=3.13"
 authors = [{ name = "Niklas Puller" }]
-dependencies = []
+dependencies = [
+    "fitdecode>=0.11.0",
+    "numpy>=2.5.2",
+    "pandas>=3.0.5",
+    "pandera>=0.32.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -33,6 +38,11 @@ addopts = "-q"
 python_version = "3.13"
 strict = true
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# fitdecode ships no type stubs; pandas' bundled types are incomplete for strict mode.
+module = ["fitdecode.*", "pandas.*"]
+ignore_missing_imports = true
 
 [dependency-groups]
 dev = [
