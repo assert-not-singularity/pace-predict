@@ -14,13 +14,17 @@ Units are normalized and made explicit in the column names (see ``schema``). Not
 - Latitude/longitude are semicircles in FIT and converted to degrees.
 - The ``dynamicsPace`` Connect IQ data field logs its own speed/grade estimate as developer
   fields; the speed estimate is captured as ``dynamics_pace_speed_mps`` — the baseline to beat.
+
+Multisport files (e.g. a triathlon) carry several ``session`` messages, one per sport segment.
+These are retained in ``Activity.sessions``; :func:`running_sessions` slices the running segment(s)
+out as standalone activities.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -66,13 +70,23 @@ class ActivityMeta:
     is_treadmill: bool
 
 
+def _empty_sessions_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=list(S.SESSION_COLUMNS))
+
+
 @dataclass(frozen=True)
 class Activity:
-    """A parsed activity: the per-second record frame, the lap frame, and metadata."""
+    """A parsed activity: the per-second record frame, the lap frame, sessions, and metadata.
+
+    ``sessions`` has one row per sport segment. A plain activity has a single session; a multisport
+    file (e.g. a triathlon) has several, each with its own sport and time/lap range. Use
+    :func:`running_sessions` to pull the running segment(s) out as standalone activities.
+    """
 
     records: pd.DataFrame
     laps: pd.DataFrame
     meta: ActivityMeta
+    sessions: pd.DataFrame = field(default_factory=_empty_sessions_frame)
 
 
 # ---- pure helpers -------------------------------------------------------------------------------
@@ -112,6 +126,22 @@ def _as_float(value: Any | None) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_int(value: Any | None) -> int | None:
+    """Coerce a raw FIT value to int, or None if it is absent or non-integral."""
+    parsed = _as_float(value)
+    if parsed is None or parsed != int(parsed):
+        return None
+    return int(parsed)
+
+
+def _str_or_none(value: Any | None) -> str | None:
+    """A trimmed string, or None if the value is absent or blank."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _developer_value(row: Mapping[str, Any], *, contains: str, kind: str) -> float | None:
@@ -196,6 +226,197 @@ def build_laps_frame(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame.from_records(records, columns=S.LAP_COLUMNS)
 
 
+def build_sessions_frame(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    fallback_sport: str | None,
+    fallback_sub_sport: str | None,
+    records: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build the session frame (one row per sport segment) from raw ``session`` message dicts.
+
+    A session's end time is ``start_time + total_elapsed_time`` (the convention
+    :func:`build_laps_frame` uses for laps). A file with no ``session`` messages yields a single
+    synthetic session spanning all records, carrying the fallback sport — so ``sessions`` is never
+    empty for a real activity and single-sport files behave exactly as before.
+    """
+    out: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        start = row.get("start_time")
+        start_ts = pd.to_datetime(start, utc=True) if start is not None else None
+        elapsed = _as_float(row.get("total_elapsed_time"))
+        end_ts = None
+        if start_ts is not None and elapsed is not None:  # elapsed may legitimately be 0.0
+            end_ts = start_ts + pd.to_timedelta(elapsed, unit="s")
+        out.append(
+            {
+                S.SESSION_INDEX: index,
+                S.SESSION_SPORT: _str_or_none(row.get("sport")),
+                S.SESSION_SUB_SPORT: _str_or_none(row.get("sub_sport")),
+                S.SESSION_START_TIME: start_ts,
+                S.SESSION_END_TIME: end_ts,
+                S.SESSION_ELAPSED_S: elapsed,
+                S.SESSION_TIMER_S: _as_float(row.get("total_timer_time")),
+                S.SESSION_DISTANCE_M: _as_float(row.get("total_distance")),
+                S.SESSION_FIRST_LAP_INDEX: _as_int(row.get("first_lap_index")),
+                S.SESSION_NUM_LAPS: _as_int(row.get("num_laps")),
+            }
+        )
+    if not out:
+        out.append(_synthetic_session(fallback_sport, fallback_sub_sport, records))
+    return pd.DataFrame.from_records(out, columns=S.SESSION_COLUMNS)
+
+
+def _synthetic_session(
+    sport: str | None, sub_sport: str | None, records: pd.DataFrame
+) -> dict[str, Any]:
+    """A single session spanning every record, for files that carry no ``session`` message."""
+    timestamps = records[S.TIMESTAMP]
+    distance = records[S.DISTANCE_M]
+    return {
+        S.SESSION_INDEX: 0,
+        S.SESSION_SPORT: _str_or_none(sport),
+        S.SESSION_SUB_SPORT: _str_or_none(sub_sport),
+        S.SESSION_START_TIME: timestamps.min() if len(records) else None,
+        # None end => the split includes every record from the start onward (no upper bound).
+        S.SESSION_END_TIME: None,
+        S.SESSION_ELAPSED_S: None,
+        S.SESSION_TIMER_S: None,
+        S.SESSION_DISTANCE_M: float(distance.max()) if distance.notna().any() else None,
+        S.SESSION_FIRST_LAP_INDEX: 0,
+        S.SESSION_NUM_LAPS: None,
+    }
+
+
+# ---- session splitting --------------------------------------------------------------------------
+
+
+def running_sessions(activity: Activity) -> list[Activity]:
+    """Extract each running session as a standalone :class:`Activity`.
+
+    For every session with ``sport == "running"`` the records are sliced to that session's time
+    window, the laps to its lap range, and ``t_s`` is rebased to zero — so each returned activity
+    drops straight into the ground-truth pipeline. This is how the running leg of a multisport file
+    (e.g. the 5 km run of a triathlon) becomes usable instead of the whole file being one blob.
+    Sessions with no records in their window (a transition, say) are skipped.
+    """
+    sessions = activity.sessions
+    windows = _session_windows(sessions)
+    out: list[Activity] = []
+    for position, (_, row) in enumerate(sessions.iterrows()):
+        if row[S.SESSION_SPORT] != "running":
+            continue
+        sub = _slice_session(activity, position, row, *windows[position])
+        if sub is not None:
+            out.append(sub)
+    return out
+
+
+def _session_windows(
+    sessions: pd.DataFrame,
+) -> list[tuple[pd.Timestamp | None, pd.Timestamp | None]]:
+    """Half-open ``[start, end)`` record window per session.
+
+    Sessions are tiled by consecutive start times — each runs until the next session's start, the
+    last to the end of the records — the same way ``estimate.lap_segments`` tiles laps. Every record
+    lands in exactly one session (no boundary sample double-counted, none dropped), and it is robust
+    to the sub-second overlap that elapsed-time rounding can leave between contiguous sessions. A
+    ``None`` bound means "unbounded on that side".
+    """
+    starts = [s if not pd.isna(s) else None for s in sessions[S.SESSION_START_TIME]]
+    windows: list[tuple[pd.Timestamp | None, pd.Timestamp | None]] = []
+    for i in range(len(starts)):
+        end = starts[i + 1] if i + 1 < len(starts) else None
+        windows.append((starts[i], end))
+    return windows
+
+
+def _slice_session(
+    activity: Activity,
+    position: int,
+    row: Mapping[str, Any],
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+) -> Activity | None:
+    """One session as a standalone activity, or None if no records fall in its window."""
+    records = activity.records
+    timestamps = records[S.TIMESTAMP]
+    mask = pd.Series(True, index=records.index)
+    if start is not None:
+        mask &= timestamps >= start
+    if end is not None:
+        mask &= timestamps < end
+
+    sliced = records[mask]
+    if sliced.empty:
+        log.warning(
+            "session %s (%s) has no records in its window; skipping",
+            row[S.SESSION_INDEX],
+            row[S.SESSION_SPORT],
+        )
+        return None
+
+    sliced = _rebase_t_s(sliced)
+    laps = _slice_laps(activity.laps, row, start, end)
+    sessions = activity.sessions.iloc[[position]].reset_index(drop=True)
+    return Activity(
+        records=sliced, laps=laps, meta=_session_meta(activity, row, sliced), sessions=sessions
+    )
+
+
+def _rebase_t_s(frame: pd.DataFrame) -> pd.DataFrame:
+    """Copy of a record slice with ``t_s`` re-zeroed to the slice's own start."""
+    frame = frame.sort_values(S.TIMESTAMP, kind="stable").reset_index(drop=True)
+    frame[S.T_S] = (frame[S.TIMESTAMP] - frame[S.TIMESTAMP].min()).dt.total_seconds()
+    return frame
+
+
+def _slice_laps(
+    laps: pd.DataFrame,
+    row: Mapping[str, Any],
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+) -> pd.DataFrame:
+    """Laps belonging to a session: by the session's lap-index range, or by time window if absent.
+
+    ``lap_index`` in the lap frame is the FIT global lap index (laps are enumerated in file order),
+    so the session's ``first_lap_index``/``num_laps`` select its laps exactly.
+    """
+    if laps.empty:
+        return laps
+
+    first_lap = row[S.SESSION_FIRST_LAP_INDEX]
+    num_laps = row[S.SESSION_NUM_LAPS]
+    if not pd.isna(first_lap) and not pd.isna(num_laps):
+        low = int(first_lap)
+        high = low + int(num_laps)
+        selected = laps[(laps[S.LAP_INDEX] >= low) & (laps[S.LAP_INDEX] < high)]
+    else:
+        starts = laps[S.LAP_START_TIME]
+        mask = pd.Series(True, index=laps.index)
+        if start is not None:
+            mask &= starts >= start
+        if end is not None:
+            mask &= starts < end
+        selected = laps[mask]
+    return selected.reset_index(drop=True)
+
+
+def _session_meta(activity: Activity, row: Mapping[str, Any], sliced: pd.DataFrame) -> ActivityMeta:
+    """Metadata for a single session sliced out of a larger activity."""
+    sub_sport = _str_or_none(row[S.SESSION_SUB_SPORT])
+    has_gps = bool(sliced[S.LATITUDE_DEG].notna().any())
+    return ActivityMeta(
+        source_path=activity.meta.source_path,
+        sport=_str_or_none(row[S.SESSION_SPORT]),
+        sub_sport=sub_sport,
+        start_time=sliced[S.TIMESTAMP].min(),
+        n_records=len(sliced),
+        sampling_dt_s=_median_dt_s(sliced),
+        is_treadmill=(sub_sport == "treadmill") or not has_gps,
+    )
+
+
 def _median_dt_s(frame: pd.DataFrame) -> float | None:
     if len(frame) < _MIN_ROWS_FOR_DT:
         return None
@@ -210,14 +431,24 @@ def _median_dt_s(frame: pd.DataFrame) -> float | None:
 
 def read_fit_frames(
     path: Path,
-) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]], str | None, str | None]:
-    """Read a FIT file into raw record dicts, lap dicts, and sport/sub_sport.
+) -> tuple[
+    list[Mapping[str, Any]],
+    list[Mapping[str, Any]],
+    list[Mapping[str, Any]],
+    str | None,
+    str | None,
+]:
+    """Read a FIT file into raw record, lap, and session dicts, plus a fallback sport/sub_sport.
 
     For each record the first non-null value per field name is kept, so native fields take
-    precedence over the developer-field duplicates some Connect IQ apps re-log.
+    precedence over the developer-field duplicates some Connect IQ apps re-log. Every ``session``
+    message is retained (a multisport file has one per sport). The scalar sport/sub_sport is the
+    last-seen value across ``sport``/``session`` messages, used only as a fallback for files that
+    carry no ``session`` message.
     """
     record_rows: list[Mapping[str, Any]] = []
     lap_rows: list[Mapping[str, Any]] = []
+    session_rows: list[Mapping[str, Any]] = []
     sport: str | None = None
     sub_sport: str | None = None
 
@@ -227,30 +458,37 @@ def read_fit_frames(
                 continue
             if frame.name == "record":
                 row: dict[str, Any] = {}
-                for field in frame.fields:
-                    if field.name not in row or row[field.name] is None:
-                        row[field.name] = field.value
+                for record_field in frame.fields:
+                    if record_field.name not in row or row[record_field.name] is None:
+                        row[record_field.name] = record_field.value
                 record_rows.append(row)
             elif frame.name == "lap":
                 lap_rows.append({f.name: f.value for f in frame.fields})
             elif frame.name in ("sport", "session"):
                 sport = frame.get_value("sport", fallback=sport)
                 sub_sport = frame.get_value("sub_sport", fallback=sub_sport)
+                if frame.name == "session":
+                    session_rows.append({f.name: f.value for f in frame.fields})
 
-    return record_rows, lap_rows, sport, sub_sport
+    return record_rows, lap_rows, session_rows, sport, sub_sport
 
 
 def load_activity(path: str | Path, *, validate: bool = True) -> Activity:
     """Parse a FIT file into a validated :class:`Activity`."""
     path = Path(path)
-    record_rows, lap_rows, sport, sub_sport = read_fit_frames(path)
+    record_rows, lap_rows, session_rows, sport, sub_sport = read_fit_frames(path)
 
     records = build_records_frame(list(record_rows))
     laps = build_laps_frame(list(lap_rows))
+    sessions = build_sessions_frame(
+        list(session_rows), fallback_sport=sport, fallback_sub_sport=sub_sport, records=records
+    )
     if validate:
         records = S.RECORDS_SCHEMA.validate(records)
         if not laps.empty:
             laps = S.LAPS_SCHEMA.validate(laps)
+        if not sessions.empty:
+            sessions = S.SESSIONS_SCHEMA.validate(sessions)
 
     has_gps = bool(records[S.LATITUDE_DEG].notna().any())
     meta = ActivityMeta(
@@ -271,4 +509,4 @@ def load_activity(path: str | Path, *, validate: bool = True) -> Activity:
         meta.sampling_dt_s,
         meta.is_treadmill,
     )
-    return Activity(records=records, laps=laps, meta=meta)
+    return Activity(records=records, laps=laps, meta=meta, sessions=sessions)
