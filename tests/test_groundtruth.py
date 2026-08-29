@@ -199,6 +199,14 @@ def test_guard_dropouts_preserves_sustained_stop() -> None:
     assert out[35] == pytest.approx(0.0, abs=0.1)  # a real stop is not interpolated away
 
 
+def test_guard_dropouts_keeps_short_run_at_the_edge() -> None:
+    # A brief low-speed run at the very start has no context on one side to interpolate from, so it
+    # is left as recorded (a real start-up, not extended flat to running speed).
+    speed = np.concatenate([np.full(4, 0.05), np.full(56, 3.0)])
+    out = guard_dropouts(speed, 1.0)
+    assert out[1] == pytest.approx(0.05, abs=0.3)
+
+
 # ---- reconstruction (segment_pace) --------------------------------------------------------------
 
 

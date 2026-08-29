@@ -80,24 +80,28 @@ def guard_dropouts(
     """Interpolate over short GNSS dropouts — a speed collapse far below the local level.
 
     Under tree cover the recorded speed briefly falls to near zero even though the runner keeps
-    going. Such a sample sits far below a robust ~``baseline_s`` median of its surroundings, so any
-    run below ``low_frac`` of that baseline and no longer than ``max_gap_s`` is treated as a dropout
-    and linearly interpolated across. A stop is preserved once it lasts longer than ``max_gap_s`` or
-    long enough (~half of ``baseline_s``) to drive the local baseline to zero; a brief real stop
-    inside that band is indistinguishable from a dropout here and would be filled — telling the two
-    apart (e.g. from cadence) is left to the caller's data-quality selection.
+    going. Such a sample sits far below a robust ~``baseline_s`` median of its surroundings, so an
+    *interior* run below ``low_frac`` of that baseline and no longer than ``max_gap_s`` counts as a
+    dropout and is linearly interpolated across. A stop is preserved when it lasts longer than
+    ``max_gap_s``, is long enough (~half of ``baseline_s``) to drive the local baseline to zero, or
+    touches the start/end of the run — a boundary collapse has no context on one side to interpolate
+    from and is more likely a real start/stop than a dropout. A brief interior real stop is
+    indistinguishable from a dropout here; telling the two apart (e.g. from cadence) is left to the
+    caller's data-quality selection.
     """
     speed = np.nan_to_num(_fill_nan(_as_array(speed_mps)), nan=0.0)
     n = len(speed)
     if n < _MIN_POINTS:
         return np.clip(speed, 0.0, None)
 
-    # Flag short low-speed runs against a robust local baseline.
-    baseline = median_filter(speed, size=_odd(round(baseline_s / dt_s)))
+    # Flag short low-speed runs against a robust local baseline. "nearest" boundary handling avoids
+    # mirroring higher running speeds into the baseline at the edges (which would flag a real stop).
+    baseline = median_filter(speed, size=_odd(round(baseline_s / dt_s)), mode="nearest")
     low = speed < low_frac * baseline
     max_gap = max(1, round(max_gap_s / dt_s))
 
-    # Blank the dropouts, then interpolate over them by index.
+    # Blank interior dropouts, then interpolate over them by index. Runs touching the start/end have
+    # no finite context on one side, so they are left as recorded rather than extended flat.
     out = speed.astype(np.float64, copy=True)
     i = 0
     while i < n:
@@ -107,7 +111,7 @@ def guard_dropouts(
         j = i
         while j < n and low[j]:
             j += 1
-        if (j - i) <= max_gap:
+        if i > 0 and j < n and (j - i) <= max_gap:
             out[i:j] = np.nan
         i = j
     return np.clip(_fill_nan(out), 0.0, None)
