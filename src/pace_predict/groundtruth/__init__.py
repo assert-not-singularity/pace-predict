@@ -7,33 +7,53 @@ from pace_predict.groundtruth.calibrate import (
     calibrate_to_distance,
     integrate_speed,
 )
-from pace_predict.groundtruth.estimate import ground_truth_speed, lap_segments, median_dt_s
+from pace_predict.groundtruth.estimate import (
+    SegmentParams,
+    ground_truth_speed,
+    lap_segments,
+    median_dt_s,
+    segment_pace,
+)
 from pace_predict.groundtruth.quality import (
-    cadence_change_points,
+    ACCEL,
+    DECEL,
+    STEADY,
+    PhaseParams,
+    PhaseSegment,
     is_track_like,
+    phase_labels,
+    phase_segments,
     track_concentration,
 )
 from pace_predict.groundtruth.smoothing import (
-    kalman_rts_speed,
+    guard_dropouts,
     latlon_to_enu,
+    median_clean,
     robust_speed,
-    savgol_speed,
 )
 
 __all__ = [
+    "ACCEL",
+    "DECEL",
+    "STEADY",
     "LapSegment",
-    "cadence_change_points",
+    "PhaseParams",
+    "PhaseSegment",
+    "SegmentParams",
     "calibrate_ground_truth",
     "calibrate_per_lap",
     "calibrate_to_distance",
     "ground_truth_speed",
+    "guard_dropouts",
     "integrate_speed",
     "is_track_like",
-    "kalman_rts_speed",
     "lap_segments",
     "latlon_to_enu",
+    "median_clean",
     "median_dt_s",
+    "phase_labels",
+    "phase_segments",
     "robust_speed",
-    "savgol_speed",
+    "segment_pace",
     "track_concentration",
 ]
