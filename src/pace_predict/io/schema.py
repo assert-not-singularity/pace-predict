@@ -71,6 +71,32 @@ LAP_COLUMNS: tuple[str, ...] = (
     LAP_DISTANCE_M,
 )
 
+# Session columns (one row per sport segment; a plain activity has one session, a multisport file
+# — e.g. a triathlon — has several, each with its own sport and time/lap range).
+SESSION_INDEX = "session_index"
+SESSION_SPORT = "sport"
+SESSION_SUB_SPORT = "sub_sport"
+SESSION_START_TIME = "start_time"
+SESSION_END_TIME = "end_time"
+SESSION_ELAPSED_S = "total_elapsed_time_s"
+SESSION_TIMER_S = "total_timer_time_s"
+SESSION_DISTANCE_M = "total_distance_m"
+SESSION_FIRST_LAP_INDEX = "first_lap_index"
+SESSION_NUM_LAPS = "num_laps"
+
+SESSION_COLUMNS: tuple[str, ...] = (
+    SESSION_INDEX,
+    SESSION_SPORT,
+    SESSION_SUB_SPORT,
+    SESSION_START_TIME,
+    SESSION_END_TIME,
+    SESSION_ELAPSED_S,
+    SESSION_TIMER_S,
+    SESSION_DISTANCE_M,
+    SESSION_FIRST_LAP_INDEX,
+    SESSION_NUM_LAPS,
+)
+
 
 def _f(*, nullable: bool = True, ge: float | None = None, le: float | None = None) -> pa.Column:
     """A nullable, coercible float column with optional physical-range bounds."""
@@ -126,6 +152,27 @@ LAPS_SCHEMA = pa.DataFrameSchema(
         LAP_ELAPSED_S: _f(ge=0.0),
         LAP_TIMER_S: _f(ge=0.0),
         LAP_DISTANCE_M: _f(ge=0.0),
+    },
+    strict=True,
+    coerce=True,
+)
+
+# Sessions cross the module boundary inside Activity, so they are validated too. sport/sub_sport
+# are not coerced: coercing a null to ``str`` would turn a missing sport into the literal "None".
+SESSIONS_SCHEMA = pa.DataFrameSchema(
+    {
+        SESSION_INDEX: pa.Column(int, nullable=False, coerce=True, checks=pa.Check.ge(0)),
+        SESSION_SPORT: pa.Column(str, nullable=True, coerce=False),
+        SESSION_SUB_SPORT: pa.Column(str, nullable=True, coerce=False),
+        SESSION_START_TIME: pa.Column("datetime64[ns, UTC]", nullable=True, coerce=True),
+        SESSION_END_TIME: pa.Column("datetime64[ns, UTC]", nullable=True, coerce=True),
+        SESSION_ELAPSED_S: _f(ge=0.0),
+        SESSION_TIMER_S: _f(ge=0.0),
+        SESSION_DISTANCE_M: _f(ge=0.0),
+        SESSION_FIRST_LAP_INDEX: pa.Column(
+            "Int64", nullable=True, coerce=True, checks=pa.Check.ge(0)
+        ),
+        SESSION_NUM_LAPS: pa.Column("Int64", nullable=True, coerce=True, checks=pa.Check.ge(0)),
     },
     strict=True,
     coerce=True,
