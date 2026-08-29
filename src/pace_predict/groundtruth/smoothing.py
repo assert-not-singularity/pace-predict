@@ -1,24 +1,19 @@
-"""Offline per-second speed estimation from an activity's distance and GPS track.
+"""Offline speed smoothing for the ground truth.
 
-Two independent estimators, both non-causal (they use the whole activity, which is fine offline
-and is what makes them clean where Garmin's live pace lags):
-
-- ``savgol_speed`` differentiates a Savitzky-Golay-smoothed cumulative-distance signal. Simple and
-  robust; leans on Garmin's already-fused distance.
-- ``kalman_rts_speed`` runs a constant-acceleration Kalman filter and RTS smoother over the GPS
-  track projected to a local metric plane. Independent of Garmin's distance fusion, so it is a
-  useful cross-check.
-
-Both return speed in m/s. Calibrate the result to known distances with ``calibrate``.
+- ``latlon_to_enu`` projects GPS to a local east/north metric plane (used by track detection).
+- ``median_clean`` is the shared spike/dropout-robust median filter (window given in seconds).
+- ``guard_dropouts`` interpolates over short GNSS dropouts (speed collapsing far below the local
+  level under tree cover); a sustained stop (long enough, or low enough to drive the local baseline
+  to zero) is preserved.
+- ``robust_speed`` cleans a recorded speed with a median filter (spike-robust and edge-preserving)
+  plus a light Savitzky-Golay pass. It is the fallback smoother for signals the phase reconstruction
+  cannot segment (a degenerate/too-short frame, or a run with no usable cadence).
 """
 
 from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-from filterpy.common import Q_discrete_white_noise
-from filterpy.kalman import KalmanFilter
-from scipy.linalg import block_diag
 from scipy.ndimage import median_filter
 from scipy.signal import savgol_filter
 
@@ -26,7 +21,7 @@ type FloatArray = npt.NDArray[np.float64]
 
 _EARTH_RADIUS_M = 6_371_000.0
 _MIN_POINTS = 2  # need at least two samples to estimate a velocity
-_POLYORDER = 2  # Savitzky-Golay polynomial order used across estimators
+_POLYORDER = 2  # Savitzky-Golay polynomial order
 
 
 def _as_array(values: npt.ArrayLike) -> FloatArray:
@@ -65,40 +60,75 @@ def latlon_to_enu(lat_deg: npt.ArrayLike, lon_deg: npt.ArrayLike) -> tuple[Float
     return east, north
 
 
-def savgol_speed(
-    distance_m: npt.ArrayLike,
+def median_clean(speed_mps: npt.ArrayLike, dt_s: float, window_s: float) -> FloatArray:
+    """Median-filter a speed signal with the window given in seconds (spike/dropout-robust)."""
+    speed = np.nan_to_num(_fill_nan(_as_array(speed_mps)), nan=0.0)
+    if len(speed) < _MIN_POINTS:
+        return np.clip(speed, 0.0, None)
+    filtered: FloatArray = median_filter(speed, size=_odd(round(window_s / dt_s)))
+    return np.clip(filtered, 0.0, None)
+
+
+def guard_dropouts(
+    speed_mps: npt.ArrayLike,
     dt_s: float,
     *,
-    window_s: float = 15.0,
-    polyorder: int = 2,
+    max_gap_s: float = 8.0,
+    low_frac: float = 0.4,
+    baseline_s: float = 31.0,
 ) -> FloatArray:
-    """Speed (m/s) as the Savitzky-Golay first derivative of cumulative distance."""
-    distance = _fill_nan(_as_array(distance_m))
-    n = len(distance)
-    if n < polyorder + _MIN_POINTS:
-        fallback: FloatArray = np.clip(np.gradient(distance, dt_s), 0.0, None)
-        return fallback
+    """Interpolate over short GNSS dropouts — a speed collapse far below the local level.
 
-    window = _odd(max(polyorder + _MIN_POINTS, round(window_s / dt_s)))
-    window = min(window, _odd(n) if n % 2 == 1 else n - 1)
-    speed: FloatArray = np.clip(
-        savgol_filter(distance, window, polyorder, deriv=1, delta=dt_s), 0.0, None
-    )
-    return speed
+    Under tree cover the recorded speed briefly falls to near zero even though the runner keeps
+    going. Such a sample sits far below a robust ~``baseline_s`` median of its surroundings, so an
+    *interior* run below ``low_frac`` of that baseline and no longer than ``max_gap_s`` counts as a
+    dropout and is linearly interpolated across. A stop is preserved when it lasts longer than
+    ``max_gap_s``, is long enough (~half of ``baseline_s``) to drive the local baseline to zero, or
+    touches the start/end of the run — a boundary collapse has no context on one side to interpolate
+    from and is more likely a real start/stop than a dropout. A brief interior real stop is
+    indistinguishable from a dropout here; telling the two apart (e.g. from cadence) is left to the
+    caller's data-quality selection.
+    """
+    speed = np.nan_to_num(_fill_nan(_as_array(speed_mps)), nan=0.0)
+    n = len(speed)
+    if n < _MIN_POINTS:
+        return np.clip(speed, 0.0, None)
+
+    # Flag short low-speed runs against a robust local baseline. "nearest" boundary handling avoids
+    # mirroring higher running speeds into the baseline at the edges (which would flag a real stop).
+    baseline = median_filter(speed, size=_odd(round(baseline_s / dt_s)), mode="nearest")
+    low = speed < low_frac * baseline
+    max_gap = max(1, round(max_gap_s / dt_s))
+
+    # Blank interior dropouts, then interpolate over them by index. Runs touching the start/end have
+    # no finite context on one side, so they are left as recorded rather than extended flat.
+    out = speed.astype(np.float64, copy=True)
+    i = 0
+    while i < n:
+        if not low[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and low[j]:
+            j += 1
+        if i > 0 and j < n and (j - i) <= max_gap:
+            out[i:j] = np.nan
+        i = j
+    return np.clip(_fill_nan(out), 0.0, None)
 
 
 def robust_speed(
     speed_mps: npt.ArrayLike,
     dt_s: float,
     *,
-    median_s: float = 21.0,
-    smooth_s: float = 11.0,
+    median_s: float = 9.0,
+    smooth_s: float = 25.0,
 ) -> FloatArray:
-    """Clean a recorded speed for use as the ground-truth base signal.
+    """Median-clean then lightly Savitzky-Golay-smooth a speed signal.
 
-    A median filter is spike-robust (it rejects GNSS peaks that averaging would smear in) and
-    edge-preserving (interval steps stay sharp), followed by a light Savitzky-Golay pass. Applied
-    to Garmin's fused ``enhanced_speed``, which is the best per-second speed in the file.
+    The median filter rejects GNSS spikes that averaging would smear in; the Savitzky-Golay pass
+    follows genuine variation (terrain over tens of seconds) without the jitter. Used as the
+    fallback smoother when the phase reconstruction cannot run (see :mod:`.estimate`).
     """
     speed = np.nan_to_num(_fill_nan(_as_array(speed_mps)), nan=0.0)
     if len(speed) < _MIN_POINTS:
@@ -111,42 +141,3 @@ def robust_speed(
         )
         cleaned = savgol_filter(cleaned, max(window, _POLYORDER + 1), _POLYORDER)
     return np.clip(cleaned, 0.0, None)
-
-
-def kalman_rts_speed(
-    east_m: npt.ArrayLike,
-    north_m: npt.ArrayLike,
-    dt_s: float,
-    *,
-    measurement_noise_m: float = 3.0,
-    accel_noise: float = 0.5,
-) -> FloatArray:
-    """Speed (m/s) from a constant-acceleration Kalman filter + RTS smoother over the GPS track.
-
-    State is ``[x, vx, ax, y, vy, ay]``; measurements are position only. ``measurement_noise_m`` is
-    the GPS position standard deviation; ``accel_noise`` is the process (acceleration) noise.
-    """
-    east = _fill_nan(_as_array(east_m))
-    north = _fill_nan(_as_array(north_m))
-    n = len(east)
-    if n < _MIN_POINTS:
-        return np.zeros(n, dtype=np.float64)
-
-    transition_block = np.array([[1.0, dt_s, 0.5 * dt_s**2], [0.0, 1.0, dt_s], [0.0, 0.0, 1.0]])
-
-    kf = KalmanFilter(dim_x=6, dim_z=2)
-    kf.F = block_diag(transition_block, transition_block)
-    kf.H = np.array([[1.0, 0, 0, 0, 0, 0], [0, 0, 0, 1.0, 0, 0]])
-    kf.R = np.eye(2) * measurement_noise_m**2
-    kf.Q = Q_discrete_white_noise(dim=3, dt=dt_s, var=accel_noise**2, block_size=2)
-    kf.x = np.array([east[0], 0.0, 0.0, north[0], 0.0, 0.0])
-    kf.P = np.diag([measurement_noise_m**2, 100.0, 100.0, measurement_noise_m**2, 100.0, 100.0])
-
-    measurements = np.column_stack([east, north])
-    means, covariances, _, _ = kf.batch_filter(measurements)
-    smoothed, _, _, _ = kf.rts_smoother(means, covariances)
-
-    velocity_east = smoothed[:, 1]
-    velocity_north = smoothed[:, 4]
-    speed: FloatArray = np.hypot(velocity_east, velocity_north)
-    return speed

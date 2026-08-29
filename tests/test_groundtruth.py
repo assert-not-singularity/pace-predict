@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 import numpy as np
@@ -9,37 +10,27 @@ import pandas as pd
 import pytest
 
 from pace_predict.groundtruth import (
+    ACCEL,
+    DECEL,
+    STEADY,
     LapSegment,
-    cadence_change_points,
     calibrate_ground_truth,
     calibrate_per_lap,
     calibrate_to_distance,
     ground_truth_speed,
+    guard_dropouts,
     integrate_speed,
-    kalman_rts_speed,
     lap_segments,
     latlon_to_enu,
     median_dt_s,
+    phase_labels,
+    phase_segments,
     robust_speed,
-    savgol_speed,
+    segment_pace,
     track_concentration,
 )
 from pace_predict.io import schema as S
 from pace_predict.io.fit import Activity, ActivityMeta, build_laps_frame
-
-
-def test_savgol_speed_recovers_constant_speed() -> None:
-    dt, speed = 1.0, 3.0
-    distance = np.arange(30, dtype=float) * speed  # constant 3 m/s
-    estimated = savgol_speed(distance, dt)
-    assert np.allclose(estimated, speed, atol=1e-6)
-
-
-def test_savgol_speed_tolerates_nan_gaps() -> None:
-    distance = np.arange(30, dtype=float) * 3.0
-    distance[10] = np.nan
-    estimated = savgol_speed(distance, 1.0)
-    assert np.isfinite(estimated).all()
 
 
 def test_latlon_to_enu_orientation() -> None:
@@ -48,14 +39,6 @@ def test_latlon_to_enu_orientation() -> None:
     east, north = latlon_to_enu(lat, lon)
     assert east[1] > east[0]
     assert north[2] > north[0]
-
-
-def test_kalman_rts_speed_recovers_constant_speed() -> None:
-    dt, speed, n = 1.0, 3.0, 60
-    east = speed * np.arange(n, dtype=float)  # straight track due east at 3 m/s
-    north = np.zeros(n)
-    estimated = kalman_rts_speed(east, north, dt)
-    assert np.mean(estimated[20:]) == pytest.approx(speed, abs=0.4)
 
 
 def test_integrate_speed_constant() -> None:
@@ -160,22 +143,127 @@ def test_track_concentration_loop_vs_line() -> None:
     assert track_concentration(straight_lat, straight_lon) < 0.3
 
 
-def test_cadence_change_points_detects_steps() -> None:
-    cadence = np.concatenate([np.full(60, 168.0), np.full(60, 176.0), np.full(60, 168.0)])
-    boundaries = cadence_change_points(cadence, 1.0)
-    assert any(abs(b - 60) <= 8 for b in boundaries)
-    assert any(abs(b - 120) <= 8 for b in boundaries)
+# ---- phase segmentation -------------------------------------------------------------------------
 
 
-def test_ground_truth_speed_calibrates_to_km_lap() -> None:
-    n = 300
-    speed = np.full(n, 3.325)  # enhanced_speed reads ~5% slow
+def _cadence_step(fast: float = 176.0, slow: float = 168.0, ramp: int = 8) -> np.ndarray:
+    """Cadence: slow plateau -> ramp up -> fast plateau -> ramp down -> slow plateau."""
+    return np.concatenate(
+        [
+            np.full(40, slow),
+            np.linspace(slow, fast, ramp),
+            np.full(40, fast),
+            np.linspace(fast, slow, ramp),
+            np.full(40, slow),
+        ]
+    )
+
+
+def test_phase_labels_detects_accel_and_decel() -> None:
+    labels = phase_labels(_cadence_step(), 1.0)
+    assert (labels == ACCEL).any()  # cadence rising
+    assert (labels == DECEL).any()  # cadence falling
+    assert labels[20] == STEADY  # inside the first plateau
+    assert labels[-20] == STEADY  # inside the last plateau
+
+
+def test_phase_labels_suppresses_quantization_wobble() -> None:
+    cadence = 174.0 + np.tile([0.0, 1.0, 0.0, -1.0], 20)  # integer +/-1 spm jitter, no real trend
+    labels = phase_labels(cadence, 1.0)
+    assert np.all(labels == STEADY)
+
+
+def test_phase_segments_partition_is_contiguous() -> None:
+    labels = np.array([0, 0, 1, 1, 1, 0, -1, -1, 0])
+    segments = phase_segments(labels)
+    assert segments[0].start == 0
+    assert segments[-1].end == len(labels)
+    assert [s.phase for s in segments] == [0, 1, 0, -1, 0]
+    for earlier, later in itertools.pairwise(segments):
+        assert earlier.end == later.start  # no gap, no overlap
+
+
+# ---- dropout guard ------------------------------------------------------------------------------
+
+
+def test_guard_dropouts_interpolates_short_dropout() -> None:
+    speed = np.full(60, 3.0)
+    speed[30:34] = 0.05  # 4 s GNSS dropout under canopy
+    out = guard_dropouts(speed, 1.0)
+    assert out[31] == pytest.approx(3.0, abs=0.3)  # filled from the surrounding level
+
+
+def test_guard_dropouts_preserves_sustained_stop() -> None:
+    speed = np.concatenate([np.full(20, 3.0), np.zeros(30), np.full(20, 3.0)])  # a 30 s stop
+    out = guard_dropouts(speed, 1.0, max_gap_s=8.0)
+    assert out[35] == pytest.approx(0.0, abs=0.1)  # a real stop is not interpolated away
+
+
+def test_guard_dropouts_keeps_short_run_at_the_edge() -> None:
+    # A brief low-speed run at the very start has no context on one side to interpolate from, so it
+    # is left as recorded (a real start-up, not extended flat to running speed).
+    speed = np.concatenate([np.full(4, 0.05), np.full(56, 3.0)])
+    out = guard_dropouts(speed, 1.0)
+    assert out[1] == pytest.approx(0.05, abs=0.3)
+
+
+# ---- reconstruction (segment_pace) --------------------------------------------------------------
+
+
+def test_segment_pace_holds_steady_levels_and_ramps() -> None:
+    cadence = _cadence_step()
+    speed = np.concatenate(
+        [
+            np.full(40, 4.0),
+            np.linspace(4.0, 3.0, 8),
+            np.full(40, 3.0),
+            np.linspace(3.0, 4.0, 8),
+            np.full(40, 4.0),
+        ]
+    )
+    records = pd.DataFrame({S.SPEED_MPS: speed, S.CADENCE_SPM: cadence})
+    out = segment_pace(records, 1.0)
+    assert out[:40].std() < 0.1  # fast plateau held near-constant
+    assert out[48:88].std() < 0.1  # slow plateau held near-constant
+    assert out[20] == pytest.approx(4.0, abs=0.2)
+    assert out[68] == pytest.approx(3.0, abs=0.2)
+    assert out[20] > out[68]  # distinct levels preserved, not smoothed together
+    # The decel transition (indices 40-47) ramps monotonically between the two plateau levels.
+    ramp = out[40:48]
+    assert out[68] - 0.2 < ramp.min() and ramp.max() < out[20] + 0.2
+    assert np.all(np.diff(ramp) < 0.0)
+
+
+def test_segment_pace_follows_measured_speed_on_trailing_accel() -> None:
+    # A run that ends mid-acceleration (sprint finish): the final transition has no plateau to ramp
+    # to, so it must follow the measured speed rather than flatten to the preceding plateau level.
+    plateau, ramp = 50, 15
+    cadence = np.concatenate([np.full(plateau, 168.0), np.linspace(168.0, 182.0, ramp)])
+    speed = np.concatenate([np.full(plateau, 3.0), np.linspace(3.0, 4.8, ramp)])
+    records = pd.DataFrame({S.SPEED_MPS: speed, S.CADENCE_SPM: cadence})
+    out = segment_pace(records, 1.0)
+    assert out[-1] > 4.0  # sprint speed is followed, not held at the 3.0 plateau
+    assert out[-1] > out[20] + 1.0
+
+
+def test_segment_pace_falls_back_without_cadence() -> None:
+    # No usable cadence must not collapse a real interval to one flat level.
+    speed = np.concatenate([np.full(30, 3.0), np.full(30, 5.0), np.full(30, 3.0)])
+    records = pd.DataFrame({S.SPEED_MPS: speed, S.CADENCE_SPM: np.full(90, np.nan)})
+    out = segment_pace(records, 1.0)
+    assert out.std() > 0.3  # the fast middle survives instead of being flattened away
+    assert out[45] > out[15] + 1.0
+
+
+def _synthetic_activity(speed: np.ndarray, cadence: np.ndarray, lap_distance_m: float) -> Activity:
+    n = len(speed)
     ts = pd.date_range("2026-06-14T17:00:00+00:00", periods=n, freq="1s")
     records = pd.DataFrame(
         {
             S.TIMESTAMP: ts,
             S.T_S: np.arange(n, dtype=float),
             S.SPEED_MPS: speed,
+            S.CADENCE_SPM: cadence,
             S.DISTANCE_M: np.cumsum(speed),
             S.LATITUDE_DEG: np.full(n, np.nan),
             S.LONGITUDE_DEG: np.full(n, np.nan),
@@ -186,7 +274,7 @@ def test_ground_truth_speed_calibrates_to_km_lap() -> None:
             {
                 "start_time": ts[0].to_pydatetime(),
                 "total_elapsed_time": float(n),
-                "total_distance": 1050.0,
+                "total_distance": lap_distance_m,
             }
         ]
     )
@@ -199,40 +287,19 @@ def test_ground_truth_speed_calibrates_to_km_lap() -> None:
         sampling_dt_s=1.0,
         is_treadmill=False,
     )
-    gt = ground_truth_speed(Activity(records=records, laps=laps, meta=meta))
+    return Activity(records=records, laps=laps, meta=meta)
+
+
+def test_ground_truth_speed_calibrates_to_km_lap() -> None:
+    n = 300
+    speed = np.full(n, 3.325)  # enhanced_speed reads ~5% slow
+    activity = _synthetic_activity(speed, np.full(n, 170.0), lap_distance_m=1050.0)
+    gt = ground_truth_speed(activity)
     assert integrate_speed(gt, 1.0)[-1] == pytest.approx(1050.0, rel=1e-3)
 
 
 def test_ground_truth_speed_all_zero_speed_does_not_crash() -> None:
     n = 60
-    ts = pd.date_range("2026-06-14T17:00:00+00:00", periods=n, freq="1s")
-    records = pd.DataFrame(
-        {
-            S.TIMESTAMP: ts,
-            S.T_S: np.arange(n, dtype=float),
-            S.SPEED_MPS: np.zeros(n),
-            S.DISTANCE_M: np.zeros(n),
-            S.LATITUDE_DEG: np.full(n, np.nan),
-            S.LONGITUDE_DEG: np.full(n, np.nan),
-        }
-    )
-    laps = build_laps_frame(
-        [
-            {
-                "start_time": ts[0].to_pydatetime(),
-                "total_elapsed_time": float(n),
-                "total_distance": 0.0,
-            }
-        ]
-    )
-    meta = ActivityMeta(
-        source_path=Path("empty.fit"),
-        sport="running",
-        sub_sport="generic",
-        start_time=ts[0],
-        n_records=n,
-        sampling_dt_s=1.0,
-        is_treadmill=False,
-    )
-    gt = ground_truth_speed(Activity(records=records, laps=laps, meta=meta))
+    activity = _synthetic_activity(np.zeros(n), np.zeros(n), lap_distance_m=0.0)
+    gt = ground_truth_speed(activity)
     assert np.all(gt == 0.0)
