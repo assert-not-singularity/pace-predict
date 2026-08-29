@@ -50,12 +50,24 @@ inventory = build_inventory(sorted(DATA.glob("*.fit")))
 inventory[["file", "sport", "dur_min", "dist_km", "laps", "track", "cadence_spm", "gct_ms", "dyn_pace"]]
 
 # %% [markdown]
+# Pick example runs from the inventory — a long non-track run for the smoothing demo and the
+# most-lapped run for the interval demo. Override `RUN` / `INTERVAL_RUN` with any file you like.
+
+# %%
+if inventory.empty:
+    raise RuntimeError("No activities loaded — put Garmin .fit files in data/fit/ (see data/README.md).")
+
+_road = inventory[inventory["sport"].str.startswith("running") & ~inventory["track"]]
+RUN = (_road if not _road.empty else inventory).sort_values("dist_km", ascending=False)["file"].iloc[0]
+INTERVAL_RUN = inventory.sort_values("laps", ascending=False)["file"].iloc[0]
+print(f"smoothing demo: {RUN}  |  interval demo: {INTERVAL_RUN}")
+
+# %% [markdown]
 # ## Smoothing: raw vs ground truth
 # The ground truth median-cleans Garmin's `enhanced_speed` (edge-preserving, spike-robust) and
 # calibrates to the >=1 km laps. On a clean run it should be a smooth pace line, far tidier than raw.
 
 # %%
-RUN = "18276671294_ACTIVITY.fit"  # a clean good-GNSS tempo run
 activity = load_activity(DATA / RUN)
 records = activity.records
 minutes = records[S.T_S].to_numpy() / 60.0
@@ -79,7 +91,6 @@ plt.show()
 # at the same moments — it reacts, it doesn't lag.
 
 # %%
-INTERVAL_RUN = "23249979275_ACTIVITY.fit"  # 400 m reps
 iv = load_activity(DATA / INTERVAL_RUN)
 iv_minutes = iv.records[S.T_S].to_numpy() / 60.0
 iv_pace = to_pace(ground_truth_speed(iv))
