@@ -157,3 +157,10 @@ def test_inventory_handles_all_files_failing(tmp_path: Path) -> None:
     # A directory of unparseable files must report failure, not crash with KeyError.
     (tmp_path / "bad.fit").write_bytes(b"not a fit file")
     assert inventory.main([str(tmp_path)]) == 1
+
+
+def test_inventory_rejects_non_directory(tmp_path: Path) -> None:
+    # Passing a file (not a directory) must return an error, not crash on iterdir().
+    target = tmp_path / "activity.fit"
+    target.write_bytes(b"x")
+    assert inventory.main([str(target)]) == 1

@@ -82,8 +82,9 @@ def _f(*, nullable: bool = True, ge: float | None = None, le: float | None = Non
     return pa.Column(float, nullable=nullable, coerce=True, checks=checks or None)
 
 
-# Records: timestamp/t_s/distance are the load-bearing, always-present fields; everything else
-# may be null (a sensor field can be absent early in a run or on some devices).
+# Records: timestamp and t_s are the always-present fields; distance and every sensor field may be
+# null (a sample can be absent early in a run or on some devices), so one bad record does not
+# discard the whole activity.
 RECORDS_SCHEMA = pa.DataFrameSchema(
     {
         TIMESTAMP: pa.Column("datetime64[ns, UTC]", nullable=False, coerce=True),

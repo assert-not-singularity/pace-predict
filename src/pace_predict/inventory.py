@@ -62,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("directory", type=Path, help="directory of .fit files")
     args = parser.parse_args(argv)
 
+    if not args.directory.is_dir():
+        print(f"not a directory: {args.directory}")
+        return 1
+
     paths = sorted({p.resolve() for p in args.directory.iterdir() if p.suffix.lower() == ".fit"})
     if not paths:
         print(f"no .fit files found in {args.directory}")
