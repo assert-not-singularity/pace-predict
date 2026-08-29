@@ -1,12 +1,13 @@
 """Ground-truth pace: reconstruct a clean per-second speed offline and calibrate it to distance."""
 
 from pace_predict.groundtruth.calibrate import (
+    LapSegment,
     calibrate_ground_truth,
     calibrate_per_lap,
     calibrate_to_distance,
     integrate_speed,
 )
-from pace_predict.groundtruth.estimate import ground_truth_speed, lap_end_indices, median_dt_s
+from pace_predict.groundtruth.estimate import ground_truth_speed, lap_segments, median_dt_s
 from pace_predict.groundtruth.quality import (
     cadence_change_points,
     is_track_like,
@@ -20,6 +21,7 @@ from pace_predict.groundtruth.smoothing import (
 )
 
 __all__ = [
+    "LapSegment",
     "cadence_change_points",
     "calibrate_ground_truth",
     "calibrate_per_lap",
@@ -28,7 +30,7 @@ __all__ = [
     "integrate_speed",
     "is_track_like",
     "kalman_rts_speed",
-    "lap_end_indices",
+    "lap_segments",
     "latlon_to_enu",
     "median_dt_s",
     "robust_speed",

@@ -13,10 +13,13 @@ from pathlib import Path
 
 import pandas as pd
 
+from pace_predict.groundtruth.quality import track_concentration
 from pace_predict.io import Activity, load_activity
 from pace_predict.io import schema as S
 
 log = logging.getLogger(__name__)
+
+_TRACK_THRESHOLD = 0.5
 
 
 def summarize_activity(activity: Activity) -> dict[str, object]:
@@ -38,6 +41,10 @@ def summarize_activity(activity: Activity) -> dict[str, object]:
         "dist_km": round(float(distance.max()) / 1000.0, 2) if distance.notna().any() else None,
         "laps": len(activity.laps),
         "has_gps": bool(records[S.LATITUDE_DEG].notna().any()),
+        "track": track_concentration(
+            records[S.LATITUDE_DEG].to_numpy(), records[S.LONGITUDE_DEG].to_numpy()
+        )
+        >= _TRACK_THRESHOLD,
         "cadence_spm": _mean(S.CADENCE_SPM),
         "gct_ms": _mean(S.GROUND_CONTACT_TIME_MS),
         "vo_mm": _mean(S.VERTICAL_OSCILLATION_MM),

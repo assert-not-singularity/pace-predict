@@ -44,8 +44,10 @@ def _fill_nan(series: FloatArray) -> FloatArray:
     return filled
 
 
-def _odd(value: int) -> int:
-    return value if value % 2 == 1 else value + 1
+def _odd(value: float) -> int:
+    """Nearest odd integer >= 1 (windows must be odd and positive)."""
+    v = max(round(value), 1)
+    return v if v % 2 == 1 else v + 1
 
 
 def latlon_to_enu(lat_deg: npt.ArrayLike, lon_deg: npt.ArrayLike) -> tuple[FloatArray, FloatArray]:
