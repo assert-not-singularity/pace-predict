@@ -1,6 +1,14 @@
-# Data — FIT files contain personal GPS/health data; never commit
+# Data — activity files contain personal GPS/health data; never commit
 /data/*
 !/data/README.md
+
+# Belt-and-suspenders: never commit activity exports anywhere in the tree
+*.fit
+*.FIT
+*.tcx
+*.TCX
+*.gpx
+*.GPX
 
 # Model artifacts
 models/
