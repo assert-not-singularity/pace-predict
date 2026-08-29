@@ -91,8 +91,8 @@ def robust_speed(
     speed_mps: npt.ArrayLike,
     dt_s: float,
     *,
-    median_s: float = 9.0,
-    smooth_s: float = 5.0,
+    median_s: float = 21.0,
+    smooth_s: float = 11.0,
 ) -> FloatArray:
     """Clean a recorded speed for use as the ground-truth base signal.
 
