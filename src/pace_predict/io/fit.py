@@ -78,9 +78,11 @@ def _empty_sessions_frame() -> pd.DataFrame:
 class Activity:
     """A parsed activity: the per-second record frame, the lap frame, sessions, and metadata.
 
-    ``sessions`` has one row per sport segment. A plain activity has a single session; a multisport
-    file (e.g. a triathlon) has several, each with its own sport and time/lap range. Use
-    :func:`running_sessions` to pull the running segment(s) out as standalone activities.
+    As produced by :func:`load_activity`, ``sessions`` has one row per sport segment — a plain
+    activity has a single session; a multisport file (e.g. a triathlon) has several, each with its
+    own sport and time/lap range. It defaults to an empty frame when an ``Activity`` is constructed
+    directly. Use :func:`running_sessions` to pull the running segment(s) out as standalone
+    activities.
     """
 
     records: pd.DataFrame
@@ -315,20 +317,26 @@ def running_sessions(activity: Activity) -> list[Activity]:
 def _session_windows(
     sessions: pd.DataFrame,
 ) -> list[tuple[pd.Timestamp | None, pd.Timestamp | None]]:
-    """Half-open ``[start, end)`` record window per session.
+    """Half-open ``[start, end)`` record window per session, in the frame's row order.
 
-    Sessions are tiled by consecutive start times — each runs until the next session's start, the
-    last to the end of the records — the same way ``estimate.lap_segments`` tiles laps. Every record
-    lands in exactly one session (no boundary sample double-counted, none dropped), and it is robust
-    to the sub-second overlap that elapsed-time rounding can leave between contiguous sessions. A
-    ``None`` bound means "unbounded on that side".
+    Each session runs until the next session's start **in time**, the last to the end of the
+    records — the same way ``estimate.lap_segments`` tiles laps. Ordering by start time (rather than
+    row order) means every record lands in exactly one session even if the ``session`` messages are
+    not stored chronologically; no boundary sample is double-counted or dropped, and the sub-second
+    overlap that elapsed-time rounding can leave between contiguous sessions is absorbed. A ``None``
+    bound means "unbounded on that side".
     """
     starts = [s if not pd.isna(s) else None for s in sessions[S.SESSION_START_TIME]]
-    windows: list[tuple[pd.Timestamp | None, pd.Timestamp | None]] = []
-    for i in range(len(starts)):
-        end = starts[i + 1] if i + 1 < len(starts) else None
-        windows.append((starts[i], end))
-    return windows
+    # Rank rows by start time (rows with no start sort last) so each window ends at the next start
+    # in time; results stay in the caller's row order so they index alongside ``sessions``.
+    far_future = pd.Timestamp.max.tz_localize("UTC")
+    sort_keys: list[pd.Timestamp] = [far_future if s is None else s for s in starts]
+    order = sorted(range(len(starts)), key=lambda i: sort_keys[i])
+    end_for_row: dict[int, pd.Timestamp | None] = {}
+    for rank, row_index in enumerate(order):
+        next_row = order[rank + 1] if rank + 1 < len(order) else None
+        end_for_row[row_index] = starts[next_row] if next_row is not None else None
+    return [(starts[i], end_for_row[i]) for i in range(len(starts))]
 
 
 def _slice_session(

@@ -324,6 +324,30 @@ def test_running_sessions_empty_when_no_running_leg() -> None:
     assert running_sessions(activity) == []
 
 
+def test_running_sessions_handles_out_of_order_session_rows() -> None:
+    # Windows tile by start time, not row order: even with the run session stored before the bike
+    # session, the run is sliced to its own [start, end) and no records are mis-assigned.
+    records = build_records_frame(_multisport_record_rows())
+    sessions = build_sessions_frame(
+        [
+            _session_row("running", "generic", (10, 10.0), 50.0, (1, 1)),
+            _session_row("cycling", "generic", (0, 10.0), 100.0, (0, 1)),
+        ],
+        fallback_sport=None,
+        fallback_sub_sport=None,
+        records=records,
+    )
+    activity = Activity(
+        records=records, laps=_multisport_laps(), meta=_meta(records), sessions=sessions
+    )
+    runs = running_sessions(activity)
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.meta.n_records == 10
+    assert run.records[S.TIMESTAMP].min() == _MS_BASE + timedelta(seconds=10)
+    assert run.records[S.T_S].tolist() == [float(i) for i in range(10)]
+
+
 def test_running_sessions_single_running_session_returns_whole_activity() -> None:
     # A plain single-session running file: the one session spans every record, so nothing is lost.
     records = build_records_frame(_multisport_record_rows())
