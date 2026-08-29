@@ -3,12 +3,10 @@
 !/data/README.md
 
 # Belt-and-suspenders: never commit activity exports anywhere in the tree
-*.fit
-*.FIT
-*.tcx
-*.TCX
-*.gpx
-*.GPX
+# (case-insensitive classes also cover .Fit/.TCX/etc. on case-sensitive filesystems)
+*.[Ff][Ii][Tt]
+*.[Tt][Cc][Xx]
+*.[Gg][Pp][Xx]
 
 # Model artifacts
 models/

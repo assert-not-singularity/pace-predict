@@ -13,8 +13,11 @@ external service, or pasted into logs or PR bodies. Tests use synthetic fixtures
   them via Garmin Connect → activity → *Export Original*, or from the watch's `GARMIN/Activity`
   folder.
 - **`.tcx`** — Training Center XML. Has time, position, distance, altitude, heart rate, speed,
-  cadence, and lap markers at 1 s, but **not** running dynamics (Garmin drops them on TCX export).
-  Usable for the ground-truth smoothing track and cadence, **not** for the GCT/VO model.
+  cadence, and lap markers at the recording interval (1 s when the device uses 1-second recording),
+  but **not** running dynamics (Garmin drops them on TCX export). Usable for the ground-truth
+  smoothing track and cadence, **not** for the GCT/VO model.
+- **`.gpx`** — GPS track only (position, altitude, time; sometimes HR/cadence via extensions). No
+  running dynamics. Also gitignored; usable at most for the smoothing track.
 
 ## Recording settings for best results
 

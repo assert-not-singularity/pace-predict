@@ -234,8 +234,10 @@ happen in Phase 0 with your go-ahead.
 - **Connect IQ datafield (Fenix 6 Pro target):** consume the exported coefficients in a Monkey C
   data field for live on-watch pace, porting the Phase 4 pure-Python reference arithmetic 1:1 and
   checking it against the parity-test vectors. Read live running dynamics via
-  `Toybox.AntPlus.RunningDynamics` (`getRunningDynamics()` → cadence, GCT, VO, vertical ratio, step
-  length); **requires an HRM-Pro / RD Pod** (the Fenix 6 wrist gives cadence only) and **real
+  `Toybox.AntPlus.RunningDynamics` (`getRunningDynamics()` exposes cadence, GCT, VO, vertical ratio,
+  and step length — but the deployable model **excludes** step/stride length as GNSS-leaky, so the
+  field reads it only for diagnostics, not as a model input); **requires an HRM-Pro / RD Pod** (the
+  Fenix 6 wrist gives cadence only) and **real
   hardware to test** (the simulator does not emulate ANT+). Consider Accurate Pace's inversion
   (dynamics = fast estimate, a long GPS average = slow drift correction) with a tunable EMA output
   stage. Respect the data-field memory cap (`docs/RESEARCH.md`). Separate repo/add-on.

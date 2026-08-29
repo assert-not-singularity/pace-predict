@@ -65,15 +65,17 @@ returns `cadence` (strides/min), `stepLength` (mm), `groundContactTime` (ms), `g
 (%), `verticalOscillation` (mm), `verticalRatio` (%), `stanceTime`, `stepCount`, `walkingFlag`.
 
 - **Hardware requirement:** GCT/VO/VR/GCB require a chest strap or pod (HRM-Run/Tri/**Pro** or RD
-  Pod); the Fenix 6 wrist provides cadence only. The project already assumes an HRM-Pro.
+  Pod); the Fenix 6 wrist provides cadence only. pace-predict therefore **requires** an HRM-Pro /
+  RD Pod for the running-dynamics features.
 - **Caveats:** the object and data are `null` until ANT+ data arrives (null-check both); running
   dynamics populate only while running; the **simulator does not emulate ANT+**, so this must be
   tested on real hardware. Note the strides/min vs steps/min ×2 nuance between
   `RunningDynamicsData.cadence` and `Info.currentCadence` — verify on device.
 - **Memory & slots:** data-field memory is **≈124.7 KB on the Fenix 6 Pro** (128 KB minus ~4 KB
   overhead) but only **≈28.7 KB on the base Fenix 6** — design the shipped model for the tight
-  tier. Only **2 CIQ data fields** run per activity profile. Authoritative per-device numbers live
-  in each device's `compiler.json` in the CIQ SDK.
+  tier. Garmin devices commonly limit an activity profile to about **2 CIQ data fields**
+  (device/profile-dependent). Authoritative per-device numbers live in each device's
+  `compiler.json` in the CIQ SDK.
 - Sources: [RunningDynamicsData API](https://developer.garmin.com/connect-iq/api-docs/Toybox/AntPlus/RunningDynamicsData.html),
   [using RunningDynamics in a datafield](https://forums.garmin.com/developer/connect-iq/f/discussion/237087/using-runningdynamicsdata-groundcontactbalance-and-other-metrics-in-a-datafield),
   [data-field memory limits (131072)](https://forums.garmin.com/developer/connect-iq/f/discussion/258441/maximum-memory-for-data-field-per-device).
