@@ -30,7 +30,17 @@ from pace_predict.inventory import build_inventory
 from pace_predict.io import load_activity
 from pace_predict.io import schema as S
 
-DATA = Path("data/fit")
+
+def _repo_root() -> Path:
+    """Repo root (the directory with pyproject.toml), so the notebook works from any kernel cwd."""
+    cwd = Path.cwd()
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    return cwd
+
+
+DATA = _repo_root() / "data" / "fit"
 
 
 def to_pace(speed_mps):
@@ -47,6 +57,8 @@ def to_pace(speed_mps):
 
 # %%
 inventory = build_inventory(sorted(DATA.glob("*.fit")))
+if inventory.empty:
+    raise RuntimeError(f"No activities found under {DATA} — add Garmin .fit files (see data/README.md).")
 inventory[["file", "sport", "dur_min", "dist_km", "laps", "track", "cadence_spm", "gct_ms", "dyn_pace"]]
 
 # %% [markdown]
@@ -54,9 +66,6 @@ inventory[["file", "sport", "dur_min", "dist_km", "laps", "track", "cadence_spm"
 # most-lapped run for the interval demo. Override `RUN` / `INTERVAL_RUN` with any file you like.
 
 # %%
-if inventory.empty:
-    raise RuntimeError("No activities loaded — put Garmin .fit files in data/fit/ (see data/README.md).")
-
 _road = inventory[inventory["sport"].str.startswith("running") & ~inventory["track"]]
 RUN = (_road if not _road.empty else inventory).sort_values("dist_km", ascending=False)["file"].iloc[0]
 INTERVAL_RUN = inventory.sort_values("laps", ascending=False)["file"].iloc[0]
