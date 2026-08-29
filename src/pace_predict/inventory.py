@@ -68,14 +68,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     inventory = build_inventory(paths)
+    n_failed = len(paths) - len(inventory)
+    if inventory.empty:
+        print(f"0 activities loaded from {args.directory} ({n_failed} file(s) failed to parse)")
+        return 1
+
     with pd.option_context("display.max_columns", None, "display.width", 200):
         print(inventory.to_string(index=False))
 
     total_min = float(inventory["dur_min"].sum())
+    failed = f" | {n_failed} failed" if n_failed else ""
     print(
         f"\n{len(inventory)} activities | {total_min / 60.0:.1f} h | "
         f"{int(inventory['records'].sum())} records | "
-        f"dynamics_pace baseline in {int(inventory['dyn_pace'].sum())}/{len(inventory)}"
+        f"dynamics_pace baseline in {int(inventory['dyn_pace'].sum())}/{len(inventory)}{failed}"
     )
     return 0
 

@@ -34,7 +34,9 @@ log = logging.getLogger(__name__)
 _SEMICIRCLE_TO_DEG = 180.0 / 2**31
 _MIN_ROWS_FOR_DT = 2  # need at least two timestamps to compute a sampling interval
 
-# Direct source-field -> normalized-column copies (first present, non-null source wins).
+# Direct source-field -> normalized-column copies: the first present, non-null source name wins,
+# so the tuples encode source precedence (e.g. running power is the `RP_Power` developer field,
+# preferred over a native cycling `power` field if both are present).
 _DIRECT: tuple[tuple[str, tuple[str, ...]], ...] = (
     (S.DISTANCE_M, ("distance",)),
     (S.SPEED_MPS, ("enhanced_speed", "speed")),
@@ -103,9 +105,13 @@ def _first(row: Mapping[str, Any], names: Iterable[str]) -> Any | None:
 
 
 def _as_float(value: Any | None) -> float | None:
+    """Coerce a raw FIT value to float, or None if it is absent or non-numeric."""
     if value is None:
         return None
-    return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _developer_value(row: Mapping[str, Any], *, contains: str, kind: str) -> float | None:
@@ -115,7 +121,9 @@ def _developer_value(row: Mapping[str, Any], *, contains: str, kind: str) -> flo
             continue
         lowered = key.lower()
         if contains in lowered and kind in lowered:
-            return float(value)
+            parsed = _as_float(value)
+            if parsed is not None:
+                return parsed
     return None
 
 
@@ -129,9 +137,10 @@ def _normalize_row(row: Mapping[str, Any]) -> dict[str, Any]:
     )
     step_length_mm = _as_float(row.get("step_length"))
     out[S.STEP_LENGTH_M] = None if step_length_mm is None else step_length_mm / 1000.0
-    out[S.DYNAMICS_PACE_SPEED_MPS] = _developer_value(
-        row, contains="dynamicspace", kind="geschwindig"
-    ) or _developer_value(row, contains="dynamicspace", kind="speed")
+    speed = _developer_value(row, contains="dynamicspace", kind="geschwindig")
+    if speed is None:  # explicit: a legitimate 0.0 (at rest) must not fall through
+        speed = _developer_value(row, contains="dynamicspace", kind="speed")
+    out[S.DYNAMICS_PACE_SPEED_MPS] = speed
     out[S.DYNAMICS_PACE_GRADE_PCT] = _developer_value(row, contains="dynamicspace", kind="grade")
     for column, sources in _DIRECT:
         out[column] = _as_float(_first(row, sources))
@@ -145,10 +154,18 @@ def build_records_frame(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
 
     frame = pd.DataFrame.from_records([_normalize_row(r) for r in rows], columns=S.RECORD_COLUMNS)
 
-    # Timestamps -> tz-aware UTC; elapsed seconds from the first record.
+    # Drop records with no usable timestamp — they cannot be placed on the time axis.
     frame[S.TIMESTAMP] = pd.to_datetime(frame[S.TIMESTAMP], utc=True)
-    start = frame[S.TIMESTAMP].min()
-    frame[S.T_S] = (frame[S.TIMESTAMP] - start).dt.total_seconds()
+    dropped = int(frame[S.TIMESTAMP].isna().sum())
+    if dropped:
+        log.warning("dropping %d record(s) with no timestamp", dropped)
+        frame = frame[frame[S.TIMESTAMP].notna()]
+    if frame.empty:
+        raise ValueError("no records with a valid timestamp")
+
+    # Order by time so t_s is monotonic and the sampling interval is meaningful.
+    frame = frame.sort_values(S.TIMESTAMP, kind="stable").reset_index(drop=True)
+    frame[S.T_S] = (frame[S.TIMESTAMP] - frame[S.TIMESTAMP].min()).dt.total_seconds()
 
     # Everything except the timestamp is float.
     numeric = [c for c in S.RECORD_COLUMNS if c != S.TIMESTAMP]
@@ -163,7 +180,9 @@ def build_laps_frame(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
         start = row.get("start_time")
         elapsed = _as_float(row.get("total_elapsed_time"))
         start_ts = pd.to_datetime(start, utc=True) if start is not None else None
-        end_ts = start_ts + pd.to_timedelta(elapsed, unit="s") if (start_ts and elapsed) else None
+        end_ts = None
+        if start_ts is not None and elapsed is not None:  # elapsed may legitimately be 0.0
+            end_ts = start_ts + pd.to_timedelta(elapsed, unit="s")
         records.append(
             {
                 S.LAP_INDEX: index,
@@ -230,6 +249,8 @@ def load_activity(path: str | Path, *, validate: bool = True) -> Activity:
     laps = build_laps_frame(list(lap_rows))
     if validate:
         records = S.RECORDS_SCHEMA.validate(records)
+        if not laps.empty:
+            laps = S.LAPS_SCHEMA.validate(laps)
 
     has_gps = bool(records[S.LATITUDE_DEG].notna().any())
     meta = ActivityMeta(

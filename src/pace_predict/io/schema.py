@@ -90,7 +90,9 @@ RECORDS_SCHEMA = pa.DataFrameSchema(
         T_S: _f(nullable=False, ge=0.0),
         LATITUDE_DEG: _f(ge=-90.0, le=90.0),
         LONGITUDE_DEG: _f(ge=-180.0, le=180.0),
-        DISTANCE_M: _f(nullable=False, ge=0.0),
+        # Nullable: an occasional record can lack distance (before GPS lock, indoor); one bad
+        # sample must not discard the whole activity.
+        DISTANCE_M: _f(ge=0.0),
         # Wide bound: raw Garmin speed carries GPS spikes, and non-running sports (cycling) reach
         # higher speeds. Ingestion accepts the raw signal; cleaning happens in the smoothing stage.
         SPEED_MPS: _f(ge=0.0, le=25.0),
@@ -111,5 +113,19 @@ RECORDS_SCHEMA = pa.DataFrameSchema(
     },
     strict=True,
     ordered=False,
+    coerce=True,
+)
+
+# Laps cross the module boundary inside Activity, so they are validated too.
+LAPS_SCHEMA = pa.DataFrameSchema(
+    {
+        LAP_INDEX: pa.Column(int, nullable=False, coerce=True, checks=pa.Check.ge(0)),
+        LAP_START_TIME: pa.Column("datetime64[ns, UTC]", nullable=True, coerce=True),
+        LAP_END_TIME: pa.Column("datetime64[ns, UTC]", nullable=True, coerce=True),
+        LAP_ELAPSED_S: _f(ge=0.0),
+        LAP_TIMER_S: _f(ge=0.0),
+        LAP_DISTANCE_M: _f(ge=0.0),
+    },
+    strict=True,
     coerce=True,
 )
