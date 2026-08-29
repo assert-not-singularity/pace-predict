@@ -3,10 +3,11 @@
 - ``latlon_to_enu`` projects GPS to a local east/north metric plane (used by track detection).
 - ``median_clean`` is the shared spike/dropout-robust median filter (window given in seconds).
 - ``guard_dropouts`` interpolates over short GNSS dropouts (speed collapsing far below the local
-  level under tree cover), while leaving a genuine sustained stop untouched.
+  level under tree cover); a sustained stop (long enough, or low enough to drive the local baseline
+  to zero) is preserved.
 - ``robust_speed`` cleans a recorded speed with a median filter (spike-robust and edge-preserving)
-  plus a light Savitzky-Golay pass; it is applied *within* a cadence/GCT segment so transitions
-  between efforts are never smoothed across.
+  plus a light Savitzky-Golay pass. It is the fallback smoother for signals the phase reconstruction
+  cannot segment (a degenerate/too-short frame, or a run with no usable cadence).
 """
 
 from __future__ import annotations
@@ -81,8 +82,10 @@ def guard_dropouts(
     Under tree cover the recorded speed briefly falls to near zero even though the runner keeps
     going. Such a sample sits far below a robust ~``baseline_s`` median of its surroundings, so any
     run below ``low_frac`` of that baseline and no longer than ``max_gap_s`` is treated as a dropout
-    and linearly interpolated across. A genuine sustained stop drives the baseline itself to zero
-    (nothing is flagged) or lasts longer than ``max_gap_s``, so it is preserved.
+    and linearly interpolated across. A stop is preserved once it lasts longer than ``max_gap_s`` or
+    long enough (~half of ``baseline_s``) to drive the local baseline to zero; a brief real stop
+    inside that band is indistinguishable from a dropout here and would be filled — telling the two
+    apart (e.g. from cadence) is left to the caller's data-quality selection.
     """
     speed = np.nan_to_num(_fill_nan(_as_array(speed_mps)), nan=0.0)
     n = len(speed)
@@ -120,8 +123,8 @@ def robust_speed(
     """Median-clean then lightly Savitzky-Golay-smooth a speed signal.
 
     The median filter rejects GNSS spikes that averaging would smear in; the Savitzky-Golay pass
-    follows genuine variation (terrain over tens of seconds) without the jitter. Sized for use
-    within a single segment.
+    follows genuine variation (terrain over tens of seconds) without the jitter. Used as the
+    fallback smoother when the phase reconstruction cannot run (see :mod:`.estimate`).
     """
     speed = np.nan_to_num(_fill_nan(_as_array(speed_mps)), nan=0.0)
     if len(speed) < _MIN_POINTS:

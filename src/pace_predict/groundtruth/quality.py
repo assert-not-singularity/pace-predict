@@ -23,6 +23,7 @@ from pace_predict.groundtruth.smoothing import latlon_to_enu
 type FloatArray = npt.NDArray[np.float64]
 type IntArray = npt.NDArray[np.int_]
 
+_MIN_POINTS = 2  # np.gradient needs at least two samples
 _MIN_SMOOTH_POINTS = 5  # below this a run is too short to smooth/differentiate meaningfully
 _LOOKBACK_S = 6.0  # seconds of plateau context averaged on each side of a transition
 
@@ -166,6 +167,8 @@ def phase_labels(
     (Ground-contact time corroborates cadence but folding it in over-suppressed real ramps in
     testing, so the classifier is cadence-only.)
     """
+    if len(np.asarray(cadence_spm)) < _MIN_POINTS:
+        return np.zeros(len(np.asarray(cadence_spm)), dtype=np.int_)
     cad_s = _smooth_cadence(cadence_spm, dt_s, params.smooth_s)
     grad = np.gradient(cad_s, dt_s)
     raw: IntArray = np.where(

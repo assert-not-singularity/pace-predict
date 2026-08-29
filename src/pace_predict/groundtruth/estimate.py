@@ -1,13 +1,17 @@
 """Compose the ground-truth per-second speed for a parsed activity.
 
-Recipe (validated on real data): segment the run at cadence/GCT effort changes (steady effort =>
-steady pace), smooth Garmin's fused ``enhanced_speed`` *within* each segment so transitions are
-never smoothed across, ramp the joins, then scale so the trustworthy >=1 km laps integrate to their
-recorded distances. Short reps carry several-percent GNSS error and must not set the scale.
+Recipe (validated on real data): classify each sample by cadence phase (steady effort => steady
+pace), then reconstruct Garmin's fused ``enhanced_speed`` per segment — a median-anchored,
+drift-capped degree-1 line inside each steady segment, and a linear ramp between neighbouring steady
+levels across each transition (so an interval boundary is a crisp step, not the lagged GNSS
+re-convergence). A spike-robust median prefilter feeds the per-segment fits, and short GNSS dropouts
+are interpolated first. Finally the shape is scaled so the trustworthy >=1 km laps integrate to
+their recorded distances; short reps carry several-percent GNSS error and must not set the scale.
 
-This estimator is best-effort for *any* run. Deciding which runs/segments to trust — excluding
-track runs (GPS overshoot) and degraded-GNSS stretches — is a dataset-selection concern handled by
-the caller with the helpers in :mod:`pace_predict.groundtruth.quality`, not baked in here.
+This estimator is best-effort for *any* run (a run with no usable cadence falls back to an
+unsegmented robust smoothing). Deciding which runs/segments to trust — excluding track runs (GPS
+overshoot) and degraded-GNSS stretches — is a dataset-selection concern handled by the caller with
+the helpers in :mod:`pace_predict.groundtruth.quality`, not baked in here.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ log = logging.getLogger(__name__)
 
 _MIN_POINTS = 2
 _MIN_FIT_POINTS = 3  # need >= 3 samples for a meaningful degree-1 fit
+_MIN_CADENCE_FRACTION = 0.5  # below this share of finite cadence, the run cannot be segmented
 
 
 @dataclass(frozen=True)
@@ -91,7 +96,14 @@ def segment_pace(
 
     # Clean GNSS dropouts, classify the effort phase, reconstruct per segment.
     guarded = guard_dropouts(speed, dt_s, max_gap_s=params.dropout_gap_s)
-    labels = phase_labels(records[S.CADENCE_SPM].to_numpy(), dt_s, params=params.phase)
+    cadence = records[S.CADENCE_SPM].to_numpy()
+    if np.isfinite(cadence).mean() < _MIN_CADENCE_FRACTION:
+        # No usable cadence (a run recorded without running dynamics): the effort cannot be
+        # segmented, so fall back to a plain robust smoothing of the measured speed rather than
+        # collapsing the whole run to a single flat level.
+        log.warning("cadence largely absent; falling back to unsegmented robust speed")
+        return robust_speed(guarded, dt_s)
+    labels = phase_labels(cadence, dt_s, params=params.phase)
     return _reconstruct(
         guarded,
         phase_segments(labels),
@@ -137,12 +149,12 @@ def _reconstruct(
         left = out[start - 1] if start > 0 and np.isfinite(out[start - 1]) else np.nan
         right = out[end] if end < n and np.isfinite(out[end]) else np.nan
         if np.isfinite(left) and np.isfinite(right):
+            # Both plateau levels known: a crisp instant ramp between them (no GNSS lag).
             out[start:end] = np.linspace(left, right, end - start + 2)[1:-1]
-        elif np.isfinite(left):
-            out[start:end] = left
-        elif np.isfinite(right):
-            out[start:end] = right
         else:
+            # A transition at the start or end of the run has no plateau to ramp to on one side, so
+            # follow the measured speed instead of holding flat — flattening would discard a real
+            # fast start or sprint finish and skew the lap calibration that scales this segment.
             out[start:end] = base[start:end]
 
     remaining = ~np.isfinite(out)

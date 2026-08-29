@@ -220,6 +220,31 @@ def test_segment_pace_holds_steady_levels_and_ramps() -> None:
     assert out[20] == pytest.approx(4.0, abs=0.2)
     assert out[68] == pytest.approx(3.0, abs=0.2)
     assert out[20] > out[68]  # distinct levels preserved, not smoothed together
+    # The decel transition (indices 40-47) ramps monotonically between the two plateau levels.
+    ramp = out[40:48]
+    assert out[68] - 0.2 < ramp.min() and ramp.max() < out[20] + 0.2
+    assert np.all(np.diff(ramp) < 0.0)
+
+
+def test_segment_pace_follows_measured_speed_on_trailing_accel() -> None:
+    # A run that ends mid-acceleration (sprint finish): the final transition has no plateau to ramp
+    # to, so it must follow the measured speed rather than flatten to the preceding plateau level.
+    plateau, ramp = 50, 15
+    cadence = np.concatenate([np.full(plateau, 168.0), np.linspace(168.0, 182.0, ramp)])
+    speed = np.concatenate([np.full(plateau, 3.0), np.linspace(3.0, 4.8, ramp)])
+    records = pd.DataFrame({S.SPEED_MPS: speed, S.CADENCE_SPM: cadence})
+    out = segment_pace(records, 1.0)
+    assert out[-1] > 4.0  # sprint speed is followed, not held at the 3.0 plateau
+    assert out[-1] > out[20] + 1.0
+
+
+def test_segment_pace_falls_back_without_cadence() -> None:
+    # No usable cadence must not collapse a real interval to one flat level.
+    speed = np.concatenate([np.full(30, 3.0), np.full(30, 5.0), np.full(30, 3.0)])
+    records = pd.DataFrame({S.SPEED_MPS: speed, S.CADENCE_SPM: np.full(90, np.nan)})
+    out = segment_pace(records, 1.0)
+    assert out.std() > 0.3  # the fast middle survives instead of being flattened away
+    assert out[45] > out[15] + 1.0
 
 
 def _synthetic_activity(speed: np.ndarray, cadence: np.ndarray, lap_distance_m: float) -> Activity:
