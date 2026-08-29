@@ -33,8 +33,10 @@ agent-driven PR workflow**.
 ### Hard constraint — the model must run in a Fenix 6 Pro data field
 This is a **primary design constraint on model selection, not an afterthought.** A Connect IQ data
 field runs in a slow interpreted Monkey C VM, has **no ML runtime**, and shares a tight memory
-budget with the app (Fenix 5 was 28 KB per data field; the Fenix 6 got a modest bump via the
-System 5 update — the exact cap lives in the SDK device XML and we read it at build time). So:
+budget with the app: **≈124.7 KB per data field on the Fenix 6 Pro** but only **≈28.7 KB on the
+base Fenix 6**, and only **2 CIQ data fields** run per activity profile (see `docs/RESEARCH.md`).
+The Pro tier is comfortable; design the shipped model for the tight base-Fenix-6 tier to stay
+broadly compatible. So:
 - **Shipped model = a handful of coefficients evaluated with O(1) work per tick** — a few
   multiply-adds and at most one `pow`/`exp`. No per-tick allocation, no trees to walk, no matrices.
 - **Deployable families only:** the GCT power law, a small regularized **linear / low-degree
@@ -231,8 +233,12 @@ happen in Phase 0 with your go-ahead.
   data.
 - **Connect IQ datafield (Fenix 6 Pro target):** consume the exported coefficients in a Monkey C
   data field for live on-watch pace, porting the Phase 4 pure-Python reference arithmetic 1:1 and
-  checking it against the parity-test vectors. Respect the device's data-field memory cap (from the
-  SDK device XML). Separate repo/add-on.
+  checking it against the parity-test vectors. Read live running dynamics via
+  `Toybox.AntPlus.RunningDynamics` (`getRunningDynamics()` → cadence, GCT, VO, vertical ratio, step
+  length); **requires an HRM-Pro / RD Pod** (the Fenix 6 wrist gives cadence only) and **real
+  hardware to test** (the simulator does not emulate ANT+). Consider Accurate Pace's inversion
+  (dynamics = fast estimate, a long GPS average = slow drift correction) with a tunable EMA output
+  stage. Respect the data-field memory cap (`docs/RESEARCH.md`). Separate repo/add-on.
 
 ---
 
@@ -284,6 +290,12 @@ epic, gated on the core pipeline working.
   files in `data/` and emits the report.
 
 ## Prior art / references (leverage during implementation)
+See **`docs/RESEARCH.md`** for the full curated findings (Garmin's ~60 s pace filter; existing CIQ
+fields and the dynamics-pace gap; the live `AntPlus.RunningDynamics` API; track overshoot; memory
+budgets). Load-bearing evidence: at turns/starts/finishes the contact-time model showed **2.7%
+error vs GPS's 5.0%** — dynamics beat GPS exactly at interval boundaries, which the settling-time
+eval must capture.
+
 - **Hébert-Losier et al. 2016, PLOS One** — *Running Speed Can Be Predicted from Foot Contact Time
   during Outdoor over Ground Running.* Per-runner power law `v = c·CT^d`, r²≈0.98, ~2.5% median
   error, flat terrain. → the primary interpretable baseline and accuracy target.
