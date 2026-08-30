@@ -1,2 +1,6 @@
 # Normalize line endings to LF in the repository for all text files.
 * text=auto eol=lf
+
+# Strip Jupyter notebook outputs on commit — they can embed home GPS / health data, which MUST NOT
+# be committed. Run `uv run nbstripout --install` once locally to activate this filter; CI verifies.
+*.ipynb filter=nbstripout

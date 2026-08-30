@@ -31,3 +31,6 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+      - name: Verify notebooks carry no outputs (privacy)
+        run: uv run nbstripout --verify notebooks/*.ipynb
