@@ -33,4 +33,4 @@ jobs:
         run: uv run pytest
 
       - name: Verify notebooks carry no outputs (privacy)
-        run: uv run nbstripout --verify notebooks/*.ipynb
+        run: git ls-files -z '*.ipynb' | xargs -0 -r uv run nbstripout --verify
