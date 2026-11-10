@@ -1,8 +1,10 @@
 """Compose the ground-truth per-second speed for a parsed activity.
 
-Recipe (validated on real data): classify each sample by cadence phase (steady effort => steady
-pace), then reconstruct Garmin's fused ``enhanced_speed`` per segment — a median-anchored,
-drift-capped degree-1 line inside each steady segment, and a linear ramp between neighbouring steady
+Two reconstructions are available. The default is the lag-aware batch smoother in :mod:`.batch`.
+The alternative, implemented here, is the cadence-phase segment reconstruction: classify each
+sample by cadence phase (steady effort => steady pace), then reconstruct Garmin's fused
+``enhanced_speed`` per segment — a median-anchored, drift-capped degree-1 line inside each steady
+segment, and a linear ramp between neighbouring steady
 levels across each transition (so an interval boundary is a crisp step, not the lagged GNSS
 re-convergence). A spike-robust median prefilter feeds the per-segment fits, and short GNSS dropouts
 are interpolated first. Finally the shape is scaled so the trustworthy >=1 km laps integrate to
@@ -17,12 +19,14 @@ the helpers in :mod:`pace_predict.groundtruth.quality`, not baked in here.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 
+from pace_predict.groundtruth.batch import SmootherParams, smooth_speed
 from pace_predict.groundtruth.calibrate import LapSegment, calibrate_ground_truth
 from pace_predict.groundtruth.quality import (
     STEADY,
@@ -59,6 +63,7 @@ class SegmentParams:
 
 
 _DEFAULT_PARAMS = SegmentParams()  # shared immutable default for the functions below
+_DEFAULT_SMOOTHER = SmootherParams()
 
 
 def median_dt_s(records: pd.DataFrame) -> float:
@@ -209,17 +214,28 @@ def lap_segments(records: pd.DataFrame, laps: pd.DataFrame) -> list[LapSegment]:
 def ground_truth_speed(
     activity: Activity,
     *,
+    method: Literal["batch", "segments"] = "batch",
+    smoother: SmootherParams = _DEFAULT_SMOOTHER,
     params: SegmentParams = _DEFAULT_PARAMS,
     min_segment_m: float = 1000.0,
 ) -> FloatArray:
-    """Per-second ground-truth speed (m/s) for the activity's records."""
+    """Per-second ground-truth speed (m/s) for the activity's records.
+
+    ``method="batch"`` uses the lag-aware batch smoother (:mod:`.batch`, tuned by ``smoother``);
+    ``method="segments"`` uses the cadence-phase segment reconstruction (tuned by ``params``).
+    Either way the result is then scaled by one global factor so the trusted laps together integrate
+    to their recorded distance (for the batch smoother, which already holds each trusted lap
+    exactly, that factor is 1). ``min_segment_m`` selects the trusted laps for both steps.
+    """
     records = activity.records
     dt = median_dt_s(records)
-    shaped = segment_pace(records, dt, params=params)
+    laps = lap_segments(records, activity.laps)
+    if method == "batch":
+        shaped = smooth_speed(records, laps, dt, params=replace(smoother, min_lap_m=min_segment_m))
+    else:
+        shaped = segment_pace(records, dt, params=params)
     if not np.any(shaped > 0.0):
         log.warning(
             "%s has no positive speed; ground truth is all zero", activity.meta.source_path.name
         )
-    return calibrate_ground_truth(
-        shaped, dt, lap_segments(records, activity.laps), min_segment_m=min_segment_m
-    )
+    return calibrate_ground_truth(shaped, dt, laps, min_segment_m=min_segment_m)

@@ -1,5 +1,6 @@
 """Ground-truth pace: reconstruct a clean per-second speed offline and calibrate it to distance."""
 
+from pace_predict.groundtruth.batch import SmootherParams, estimate_gnss_lag_s, smooth_speed
 from pace_predict.groundtruth.calibrate import (
     LapSegment,
     calibrate_ground_truth,
@@ -40,9 +41,11 @@ __all__ = [
     "PhaseParams",
     "PhaseSegment",
     "SegmentParams",
+    "SmootherParams",
     "calibrate_ground_truth",
     "calibrate_per_lap",
     "calibrate_to_distance",
+    "estimate_gnss_lag_s",
     "ground_truth_speed",
     "guard_dropouts",
     "integrate_speed",
@@ -55,5 +58,6 @@ __all__ = [
     "phase_segments",
     "robust_speed",
     "segment_pace",
+    "smooth_speed",
     "track_concentration",
 ]
