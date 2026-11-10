@@ -19,7 +19,7 @@ the helpers in :mod:`pace_predict.groundtruth.quality`, not baked in here.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import numpy as np
@@ -223,13 +223,15 @@ def ground_truth_speed(
 
     ``method="batch"`` uses the lag-aware batch smoother (:mod:`.batch`, tuned by ``smoother``);
     ``method="segments"`` uses the cadence-phase segment reconstruction (tuned by ``params``).
-    Either way the result is scaled so the trusted laps integrate to their recorded distances.
+    Either way the result is then scaled by one global factor so the trusted laps together integrate
+    to their recorded distance (for the batch smoother, which already holds each trusted lap
+    exactly, that factor is 1). ``min_segment_m`` selects the trusted laps for both steps.
     """
     records = activity.records
     dt = median_dt_s(records)
     laps = lap_segments(records, activity.laps)
     if method == "batch":
-        shaped = smooth_speed(records, laps, dt, params=smoother)
+        shaped = smooth_speed(records, laps, dt, params=replace(smoother, min_lap_m=min_segment_m))
     else:
         shaped = segment_pace(records, dt, params=params)
     if not np.any(shaped > 0.0):
