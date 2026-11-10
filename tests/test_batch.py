@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,10 +12,12 @@ from pace_predict.groundtruth import (
     LapSegment,
     SmootherParams,
     estimate_gnss_lag_s,
+    ground_truth_speed,
     integrate_speed,
     smooth_speed,
 )
 from pace_predict.io import schema as S
+from pace_predict.io.fit import Activity, ActivityMeta, build_laps_frame
 
 _TRUE_LAG_S = 7.0
 
@@ -163,3 +167,49 @@ def test_smooth_speed_rejects_out_of_range_lag() -> None:
     _truth, gnss, cadence, laps = _interval_run()
     with pytest.raises(ValueError, match="lag_s"):
         smooth_speed(_records(gnss, cadence), laps, 1.0, params=SmootherParams(lag_s=-1.0))
+
+
+def test_ground_truth_speed_holds_each_trusted_lap() -> None:
+    truth, gnss, cadence, _laps = _interval_run()
+    n = len(gnss)
+    ts = pd.date_range("2026-06-14T17:00:00+00:00", periods=n, freq="1s")
+    records = pd.DataFrame(
+        {
+            S.TIMESTAMP: ts,
+            S.T_S: np.arange(n, dtype=float),
+            S.SPEED_MPS: gnss,
+            S.CADENCE_SPM: cadence,
+            S.DISTANCE_M: np.cumsum(truth),
+            S.LATITUDE_DEG: np.full(n, np.nan),
+            S.LONGITUDE_DEG: np.full(n, np.nan),
+        }
+    )
+    half = n // 2
+    # two trusted laps whose recorded distances are off by different amounts (+2% / -2%)
+    distances = [float(truth[:half].sum()) * 1.02, float(truth[half:].sum()) * 0.98]
+    laps = build_laps_frame(
+        [
+            {
+                "start_time": ts[0].to_pydatetime(),
+                "total_elapsed_time": float(half),
+                "total_distance": distances[0],
+            },
+            {
+                "start_time": ts[half].to_pydatetime(),
+                "total_elapsed_time": float(n - half),
+                "total_distance": distances[1],
+            },
+        ]
+    )
+    meta = ActivityMeta(
+        source_path=Path("synthetic.fit"),
+        sport="running",
+        sub_sport="generic",
+        start_time=ts[0],
+        n_records=n,
+        sampling_dt_s=1.0,
+        is_treadmill=False,
+    )
+    out = ground_truth_speed(Activity(records=records, laps=laps, meta=meta))
+    for (start, end), distance in zip([(0, half), (half, n)], distances, strict=True):
+        assert integrate_speed(out[start:end], 1.0)[-1] == pytest.approx(distance, rel=1e-6)
